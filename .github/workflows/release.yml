@@ -1,0 +1,141 @@
+name: Release
+
+# Triggered by pushing a version tag, e.g. `git tag v0.2.0 && git push origin v0.2.0`.
+#
+# Required repository secrets:
+#   MACOS_CERT_P12          base64-encoded Developer ID Application .p12
+#   MACOS_CERT_PASSWORD     password for the .p12
+#   APPLE_API_KEY_ID        App Store Connect API key id (for notarytool)
+#   APPLE_API_ISSUER_ID     App Store Connect API issuer id
+#   APPLE_API_KEY_P8        base64-encoded .p8 API key
+#   SPARKLE_ED_PRIVATE_KEY  Sparkle EdDSA private key (output of `generate_keys -x`)
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_26.app || sudo xcode-select -s "$(ls -d /Applications/Xcode*.app | sort -V | tail -1)"
+
+      - name: Install Tuist
+        run: brew install --quiet tuist
+
+      - name: Derive version
+        id: version
+        run: |
+          echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          echo "build=${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+
+      - name: Import signing certificate
+        env:
+          CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          KEYCHAIN=build.keychain
+          KEYCHAIN_PASSWORD=$(uuidgen)
+          echo "$CERT_P12" | base64 --decode > cert.p12
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security default-keychain -s "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -t 3600 -u "$KEYCHAIN"
+          security import cert.p12 -k "$KEYCHAIN" -P "$CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          rm cert.p12
+
+      - name: Build Release
+        env:
+          TUIST_APP_VERSION: ${{ steps.version.outputs.version }}
+          TUIST_BUILD_NUMBER: ${{ steps.version.outputs.build }}
+          TUIST_SKIP_UPDATE_CHECK: "1"
+        run: |
+          tuist install
+          tuist generate --no-open
+          tuist xcodebuild build \
+            -scheme Poise \
+            -configuration Release \
+            -destination 'platform=macOS' \
+            -derivedDataPath .build/DerivedData
+
+      - name: Create DMG
+        run: |
+          APP=".build/DerivedData/Build/Products/Release/Poise.app"
+          mkdir -p dmg-root
+          cp -R "$APP" dmg-root/
+          ln -s /Applications dmg-root/Applications
+          hdiutil create -volname "Poise" -srcfolder dmg-root -ov -format UDZO Poise.dmg
+          codesign --force --sign "Developer ID Application" Poise.dmg
+
+      - name: Notarize and staple
+        env:
+          API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          echo "$API_KEY_P8" | base64 --decode > apikey.p8
+          xcrun notarytool submit Poise.dmg \
+            --key apikey.p8 \
+            --key-id "${{ secrets.APPLE_API_KEY_ID }}" \
+            --issuer "${{ secrets.APPLE_API_ISSUER_ID }}" \
+            --wait
+          xcrun stapler staple Poise.dmg
+          rm apikey.p8
+
+      - name: Sign update for Sparkle
+        id: sparkle
+        env:
+          SPARKLE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+        run: |
+          SIGN_UPDATE="Tuist/.build/artifacts/sparkle/Sparkle/bin/sign_update"
+          echo "$SPARKLE_KEY" > sparkle_key
+          SIGNATURE_ATTRS=$("$SIGN_UPDATE" Poise.dmg --ed-key-file sparkle_key)
+          rm sparkle_key
+          echo "attrs=$SIGNATURE_ATTRS" >> "$GITHUB_OUTPUT"
+
+      - name: Update appcast
+        run: |
+          python3 - "$GITHUB_REF_NAME" "${{ steps.version.outputs.version }}" "${{ steps.version.outputs.build }}" <<'EOF'
+          import re, sys, email.utils
+          tag, version, build = sys.argv[1], sys.argv[2], sys.argv[3]
+          attrs = """${{ steps.sparkle.outputs.attrs }}"""
+          url = f"https://github.com/${{ github.repository }}/releases/download/{tag}/Poise.dmg"
+          item = f"""    <item>
+                <title>Version {version}</title>
+                <pubDate>{email.utils.formatdate(usegmt=True)}</pubDate>
+                <sparkle:version>{build}</sparkle:version>
+                <sparkle:shortVersionString>{version}</sparkle:shortVersionString>
+                <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+                <enclosure url="{url}" type="application/octet-stream" {attrs} />
+              </item>
+          """
+          with open("appcast.xml") as f:
+              content = f.read()
+          content = content.replace("  </channel>", item + "  </channel>")
+          with open("appcast.xml", "w") as f:
+              f.write(content)
+          EOF
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git stash
+          git switch main
+          git stash pop
+          git add appcast.xml
+          git commit -m "Update appcast for ${GITHUB_REF_NAME}"
+          git push origin main
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" Poise.dmg \
+            --title "Poise ${{ steps.version.outputs.version }}" \
+            --generate-notes

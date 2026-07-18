@@ -1,5 +1,9 @@
 import ProjectDescription
 
+// Overridable from CI: TUIST_APP_VERSION / TUIST_BUILD_NUMBER
+let appVersion = Environment.appVersion.getString(default: "0.1.0")
+let buildNumber = Environment.buildNumber.getString(default: "1")
+
 let project = Project(
     name: "Poise",
     targets: [
@@ -10,8 +14,8 @@ let project = Project(
             bundleId: "com.johannesgrof.Poise",
             deploymentTargets: .macOS("14.0"),
             infoPlist: .extendingDefault(with: [
-                "CFBundleShortVersionString": "0.1.0",
-                "CFBundleVersion": "1",
+                "CFBundleShortVersionString": .string(appVersion),
+                "CFBundleVersion": .string(buildNumber),
                 "LSUIElement": true,
                 "LSMinimumSystemVersion": "14.0",
                 "NSMotionUsageDescription": "Poise uses your AirPods' motion sensors to track your head posture and remind you to sit upright.",

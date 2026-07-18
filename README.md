@@ -26,6 +26,10 @@ tuist generate --no-open
 ./run-menubar.sh
 ```
 
+## License
+
+MIT — see [LICENSE](LICENSE). © 2026 Johannes Grof.
+
 ## Architecture
 
 - `Sources/HeadphoneMotionClient.swift` — CoreMotion transport, fused sensor samples

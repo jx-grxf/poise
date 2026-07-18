@@ -175,10 +175,22 @@ struct AboutSettingsPane: View {
     var body: some View {
         Form {
             Section {
-                LabeledContent("Poise") {
-                    Text(AppVersion.displayString)
-                        .foregroundStyle(.secondary)
+                HStack(spacing: 14) {
+                    Image(nsImage: NSApp.applicationIconImage)
+                        .resizable()
+                        .frame(width: 56, height: 56)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Poise")
+                            .font(.system(size: 16, weight: .bold, design: .rounded))
+                        Text(AppVersion.displayString)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text("by Johannes Grof · MIT License")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
+                .padding(.vertical, 4)
                 Text("Turns your AirPods into a posture coach. All motion analysis runs locally on your Mac.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -202,6 +214,8 @@ struct AboutSettingsPane: View {
 
             Section("Links") {
                 Link("Source on GitHub", destination: URL(string: "https://github.com/jx-grxf/poise")!)
+                Link("MIT License", destination: URL(string: "https://github.com/jx-grxf/poise/blob/main/LICENSE")!)
+                Link("Report an Issue", destination: URL(string: "https://github.com/jx-grxf/poise/issues")!)
             }
         }
         .formStyle(.grouped)
