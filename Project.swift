@@ -43,6 +43,8 @@ let project = Project(
                         "CODE_SIGN_STYLE": "Manual",
                         "CODE_SIGN_IDENTITY": "Developer ID Application",
                         "PROVISIONING_PROFILE_SPECIFIER": "",
+                        "CODE_SIGN_INJECT_BASE_ENTITLEMENTS": "NO",
+                        "OTHER_CODE_SIGN_FLAGS": "--timestamp",
                     ]),
                 ]
             )

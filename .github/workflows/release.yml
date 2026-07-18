@@ -101,6 +101,31 @@ jobs:
           mkdir -p dist
           cp -R ".build/DerivedData/Build/Products/Release/Poise.app" dist/
 
+      - name: Re-sign Sparkle components and app
+        run: |
+          set -euo pipefail
+          APP="dist/Poise.app"
+          IDENTITY="Developer ID Application"
+          SPARKLE="$APP/Contents/Frameworks/Sparkle.framework"
+          # Sparkle ships pre-signed by the Sparkle team; notarization requires
+          # every binary to carry OUR Developer ID plus a secure timestamp, so
+          # re-sign nested components inside-out before signing the app itself.
+          for nested in \
+            "$SPARKLE/Versions/B/XPCServices/Installer.xpc" \
+            "$SPARKLE/Versions/B/XPCServices/Downloader.xpc" \
+            "$SPARKLE/Versions/B/Autoupdate" \
+            "$SPARKLE/Versions/B/Updater.app"; do
+            [[ -e "$nested" ]] || continue
+            codesign --force --options runtime --timestamp \
+              --preserve-metadata=entitlements \
+              --sign "$IDENTITY" "$nested"
+          done
+          codesign --force --options runtime --timestamp --sign "$IDENTITY" "$SPARKLE"
+          codesign --force --options runtime --timestamp \
+            --preserve-metadata=entitlements \
+            --sign "$IDENTITY" "$APP"
+          codesign --verify --deep --strict "$APP"
+
       - name: Create Sparkle zip and DMG
         run: |
           set -euo pipefail
