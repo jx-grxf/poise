@@ -1,6 +1,17 @@
 name: Release
 
-# Triggered by pushing a version tag, e.g. `git tag v0.2.0 && git push origin v0.2.0`.
+# Stable release:  git tag v0.2.0 && git push origin v0.2.0
+# Beta release:    git tag v0.2.0-beta.1 && git push origin v0.2.0-beta.1
+#
+# Channel model (mirrors Sparkle best practice):
+# - Stable builds go on Sparkle's default channel (no <sparkle:channel> tag).
+#   Their appcast.xml is attached to the release, and clients poll
+#   releases/latest/download/appcast.xml — GitHub's "latest" never points at a
+#   prerelease, so stable users only ever see stable builds.
+# - Beta builds carry <sparkle:channel>beta</sparkle:channel> and are published
+#   as prereleases. A moving release tagged `beta` hosts the newest appcast
+#   (stable or beta) as the beta feed; beta clients also see default-channel
+#   items, so they roll forward onto a newer stable automatically.
 #
 # Required repository secrets:
 #   MACOS_CERT_P12          base64-encoded Developer ID Application .p12
@@ -17,9 +28,14 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: macos-26
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
         with:
@@ -31,17 +47,32 @@ jobs:
       - name: Install Tuist
         run: brew install --quiet tuist
 
-      - name: Derive version
+      - name: Resolve release identity
         id: version
         run: |
-          echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-          echo "build=${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-beta\.[0-9]+)?$ ]] || {
+            echo "error: unsupported release version '$version'" >&2
+            exit 1
+          }
+          if [[ "$version" == *-beta.* ]]; then
+            channel="beta"
+          else
+            channel="stable"
+          fi
+          {
+            echo "version=$version"
+            echo "build=${GITHUB_RUN_NUMBER}"
+            echo "channel=$channel"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Import signing certificate
         env:
           CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
           CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
         run: |
+          set -euo pipefail
           KEYCHAIN=build.keychain
           KEYCHAIN_PASSWORD=$(uuidgen)
           echo "$CERT_P12" | base64 --decode > cert.p12
@@ -59,6 +90,7 @@ jobs:
           TUIST_BUILD_NUMBER: ${{ steps.version.outputs.build }}
           TUIST_SKIP_UPDATE_CHECK: "1"
         run: |
+          set -euo pipefail
           tuist install
           tuist generate --no-open
           tuist xcodebuild build \
@@ -66,76 +98,115 @@ jobs:
             -configuration Release \
             -destination 'platform=macOS' \
             -derivedDataPath .build/DerivedData
+          mkdir -p dist
+          cp -R ".build/DerivedData/Build/Products/Release/Poise.app" dist/
 
-      - name: Create DMG
+      - name: Create Sparkle zip and DMG
         run: |
-          APP=".build/DerivedData/Build/Products/Release/Poise.app"
+          set -euo pipefail
+          (cd dist && /usr/bin/ditto -c -k --sequesterRsrc --keepParent Poise.app "Poise-${{ steps.version.outputs.version }}.zip")
           mkdir -p dmg-root
-          cp -R "$APP" dmg-root/
+          cp -R dist/Poise.app dmg-root/
           ln -s /Applications dmg-root/Applications
-          hdiutil create -volname "Poise" -srcfolder dmg-root -ov -format UDZO Poise.dmg
-          codesign --force --sign "Developer ID Application" Poise.dmg
+          hdiutil create -volname "Poise" -srcfolder dmg-root -ov -format UDZO "dist/Poise-${{ steps.version.outputs.version }}.dmg"
+          codesign --force --sign "Developer ID Application" "dist/Poise-${{ steps.version.outputs.version }}.dmg"
 
       - name: Notarize and staple
         env:
           API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
         run: |
+          set -euo pipefail
           echo "$API_KEY_P8" | base64 --decode > apikey.p8
-          xcrun notarytool submit Poise.dmg \
-            --key apikey.p8 \
-            --key-id "${{ secrets.APPLE_API_KEY_ID }}" \
-            --issuer "${{ secrets.APPLE_API_ISSUER_ID }}" \
-            --wait
-          xcrun stapler staple Poise.dmg
+          for artifact in "dist/Poise-${{ steps.version.outputs.version }}.dmg" "dist/Poise-${{ steps.version.outputs.version }}.zip"; do
+            xcrun notarytool submit "$artifact" \
+              --key apikey.p8 \
+              --key-id "${{ secrets.APPLE_API_KEY_ID }}" \
+              --issuer "${{ secrets.APPLE_API_ISSUER_ID }}" \
+              --wait
+          done
+          xcrun stapler staple "dist/Poise-${{ steps.version.outputs.version }}.dmg"
           rm apikey.p8
 
-      - name: Sign update for Sparkle
-        id: sparkle
+      - name: Build appcast
         env:
           SPARKLE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+          VERSION: ${{ steps.version.outputs.version }}
+          BUILD: ${{ steps.version.outputs.build }}
+          CHANNEL: ${{ steps.version.outputs.channel }}
         run: |
-          SIGN_UPDATE="Tuist/.build/artifacts/sparkle/Sparkle/bin/sign_update"
-          echo "$SPARKLE_KEY" > sparkle_key
-          SIGNATURE_ATTRS=$("$SIGN_UPDATE" Poise.dmg --ed-key-file sparkle_key)
-          rm sparkle_key
-          echo "attrs=$SIGNATURE_ATTRS" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          SIGN_UPDATE="$(find Tuist/.build/artifacts -type f -name sign_update | grep -v old_dsa_scripts | head -n 1)"
+          ZIP="dist/Poise-${VERSION}.zip"
+          KEY_FILE="$(mktemp)"
+          trap 'rm -f "$KEY_FILE"' EXIT
+          printf '%s' "$SPARKLE_KEY" > "$KEY_FILE"
+          SIGNATURE_LINE="$("$SIGN_UPDATE" "$ZIP" -f "$KEY_FILE")"
+          ED_SIGNATURE="$(printf '%s' "$SIGNATURE_LINE" | sed -n 's/.*sparkle:edSignature="\([^"]*\)".*/\1/p')"
+          [[ -n "$ED_SIGNATURE" ]] || { echo "error: could not parse edSignature" >&2; exit 1; }
+          LENGTH="$(stat -f%z "$ZIP")"
+          PUBDATE="$(LC_ALL=en_US date -u "+%a, %d %b %Y %H:%M:%S +0000")"
+          DOWNLOAD_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/Poise-${VERSION}.zip"
+          # Only pre-release builds carry a channel tag; stable stays on the
+          # default channel so beta users see it too.
+          CHANNEL_BLOCK=""
+          if [[ "$CHANNEL" != "stable" ]]; then
+            CHANNEL_BLOCK="      <sparkle:channel>${CHANNEL}</sparkle:channel>"
+          fi
+          {
+            printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>'
+            printf '%s\n' '<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">'
+            printf '%s\n' '  <channel>'
+            printf '%s\n' '    <title>Poise</title>'
+            printf '%s\n' "    <link>https://github.com/${GITHUB_REPOSITORY}</link>"
+            printf '%s\n' "    <description>Poise ${CHANNEL} update feed</description>"
+            printf '%s\n' '    <language>en</language>'
+            printf '%s\n' '    <item>'
+            printf '%s\n' "      <title>Poise ${VERSION}</title>"
+            [[ -n "$CHANNEL_BLOCK" ]] && printf '%s\n' "$CHANNEL_BLOCK"
+            printf '%s\n' "      <sparkle:version>${BUILD}</sparkle:version>"
+            printf '%s\n' "      <sparkle:shortVersionString>${VERSION}</sparkle:shortVersionString>"
+            printf '%s\n' '      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>'
+            printf '%s\n' "      <pubDate>${PUBDATE}</pubDate>"
+            printf '%s\n' "      <enclosure url=\"${DOWNLOAD_URL}\" length=\"${LENGTH}\" type=\"application/octet-stream\" sparkle:edSignature=\"${ED_SIGNATURE}\" />"
+            printf '%s\n' '    </item>'
+            printf '%s\n' '  </channel>'
+            printf '%s\n' '</rss>'
+          } > dist/appcast.xml
 
-      - name: Update appcast
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+          CHANNEL: ${{ steps.version.outputs.channel }}
         run: |
-          python3 - "$GITHUB_REF_NAME" "${{ steps.version.outputs.version }}" "${{ steps.version.outputs.build }}" <<'EOF'
-          import re, sys, email.utils
-          tag, version, build = sys.argv[1], sys.argv[2], sys.argv[3]
-          attrs = """${{ steps.sparkle.outputs.attrs }}"""
-          url = f"https://github.com/${{ github.repository }}/releases/download/{tag}/Poise.dmg"
-          item = f"""    <item>
-                <title>Version {version}</title>
-                <pubDate>{email.utils.formatdate(usegmt=True)}</pubDate>
-                <sparkle:version>{build}</sparkle:version>
-                <sparkle:shortVersionString>{version}</sparkle:shortVersionString>
-                <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-                <enclosure url="{url}" type="application/octet-stream" {attrs} />
-              </item>
-          """
-          with open("appcast.xml") as f:
-              content = f.read()
-          content = content.replace("  </channel>", item + "  </channel>")
-          with open("appcast.xml", "w") as f:
-              f.write(content)
-          EOF
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git fetch origin main
-          git stash
-          git switch main
-          git stash pop
-          git add appcast.xml
-          git commit -m "Update appcast for ${GITHUB_REF_NAME}"
-          git push origin main
+          set -euo pipefail
+          assets=(
+            "dist/Poise-${VERSION}.dmg#Poise-${VERSION}.dmg"
+            "dist/Poise-${VERSION}.zip#Poise-${VERSION}.zip"
+            "dist/appcast.xml#appcast.xml"
+          )
+          if [[ "$CHANNEL" == "beta" ]]; then
+            gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
+              --title "Poise ${VERSION}" --generate-notes --prerelease
+          else
+            gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
+              --title "Poise ${VERSION}" --generate-notes --latest
+          fi
 
-      - name: Create GitHub release
+      - name: Publish beta appcast feed
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" Poise.dmg \
-            --title "Poise ${{ steps.version.outputs.version }}" \
-            --generate-notes
+          set -euo pipefail
+          if gh release view beta >/dev/null 2>&1; then
+            gh release upload beta "dist/appcast.xml#appcast.xml" --clobber
+          else
+            gh release create beta "dist/appcast.xml#appcast.xml" \
+              --title "Poise Beta Feed" \
+              --notes "Moving Sparkle beta appcast feed. Install beta builds from versioned prereleases." \
+              --prerelease --latest=false
+          fi
+
+      - name: Remove signing keychain
+        if: always()
+        run: security delete-keychain build.keychain || true

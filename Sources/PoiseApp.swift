@@ -28,10 +28,10 @@ struct PoiseApp: App {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private let updaterManager = UpdaterManager.shared
+    // Created eagerly so Sparkle's updater exists before launch finishes.
+    private let updateService = UpdateService.shared
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        updaterManager.start()
         let store = PostureStore.shared
         store.startMonitoring()
         if !store.hasCompletedOnboarding {

@@ -170,7 +170,7 @@ struct DetectionSettingsPane: View {
 // MARK: - About
 
 struct AboutSettingsPane: View {
-    @ObservedObject private var updaterManager = UpdaterManager.shared
+    @State private var updateService = UpdateService.shared
 
     var body: some View {
         Form {
@@ -198,18 +198,40 @@ struct AboutSettingsPane: View {
 
             Section("Updates") {
                 Toggle(isOn: Binding(
-                    get: { updaterManager.automaticallyChecksForUpdates },
-                    set: { updaterManager.automaticallyChecksForUpdates = $0 }
+                    get: { updateService.automaticallyChecksForUpdates },
+                    set: { updateService.automaticallyChecksForUpdates = $0 }
                 )) {
                     Text("Automatically check for updates")
                 }
                 .toggleStyle(.switch)
 
-                Button("Check for Updates…") {
-                    updaterManager.checkForUpdates()
+                Picker("Update channel", selection: Binding(
+                    get: { updateService.channel },
+                    set: { updateService.channel = $0 }
+                )) {
+                    ForEach(UpdateService.Channel.allCases) { channel in
+                        Text(channel.displayName).tag(channel)
+                    }
+                }
+                .pickerStyle(.menu)
+                Text("Beta builds get new features earlier but may be less stable. Beta users automatically move back to stable once it catches up.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                LabeledContent("Last check") {
+                    if let date = updateService.lastCheckDate {
+                        Text(date.formatted(date: .abbreviated, time: .shortened))
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("Never")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Button(updateService.availableUpdateVersion.map { "Update to \($0)…" } ?? "Check for Updates…") {
+                    updateService.checkForUpdates()
                 }
                 .controlSize(.small)
-                .disabled(!updaterManager.canCheckForUpdates)
             }
 
             Section("Links") {

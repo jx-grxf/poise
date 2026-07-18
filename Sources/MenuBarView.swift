@@ -2,7 +2,7 @@ import SwiftUI
 
 struct MenuBarView: View {
     @Environment(PostureStore.self) private var store
-    @ObservedObject private var updaterManager = UpdaterManager.shared
+    private let updateService = UpdateService.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -213,10 +213,11 @@ struct MenuBarView: View {
             FooterButton(title: "Settings…", shortcut: ",") {
                 SettingsWindowController.show(tab: .general)
             }
-            FooterButton(title: "Check for Updates…") {
-                updaterManager.checkForUpdates()
+            FooterButton(
+                title: updateService.availableUpdateVersion.map { "Update to \($0)…" } ?? "Check for Updates…"
+            ) {
+                updateService.checkForUpdates()
             }
-            .disabled(!updaterManager.canCheckForUpdates)
             FooterButton(title: "Quit Poise", shortcut: "q") {
                 NSApp.terminate(nil)
             }
