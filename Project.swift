@@ -40,7 +40,9 @@ let project = Project(
                     .debug(name: "Debug"),
                     .release(name: "Release", settings: [
                         "ENABLE_HARDENED_RUNTIME": "YES",
+                        "CODE_SIGN_STYLE": "Manual",
                         "CODE_SIGN_IDENTITY": "Developer ID Application",
+                        "PROVISIONING_PROFILE_SPECIFIER": "",
                     ]),
                 ]
             )
