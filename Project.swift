@@ -20,12 +20,14 @@ let project = Project(
                 "SUEnableInstallerLauncherService": true,
             ]),
             sources: ["Sources/**"],
+            resources: ["Resources/**"],
             dependencies: [
                 .external(name: "Sparkle")
             ],
             settings: .settings(
                 base: [
                     "DEVELOPMENT_TEAM": "M45V83ZMD8",
+                    "ASSETCATALOG_COMPILER_APPICON_NAME": "AppIcon",
                     "CODE_SIGN_STYLE": "Automatic",
                     "SWIFT_VERSION": "5.10",
                 ],
