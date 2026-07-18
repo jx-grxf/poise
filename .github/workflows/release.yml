@@ -127,6 +127,40 @@ jobs:
           xcrun stapler staple "dist/Poise-${{ steps.version.outputs.version }}.dmg"
           rm apikey.p8
 
+      - name: Extract release notes
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          awk -v ver="$VERSION" '
+            $0 == "## " ver {found=1; next}
+            /^## / && found {exit}
+            found {print}
+          ' RELEASE_NOTES.md > dist/RELEASE_NOTES_CURRENT.md
+          if ! grep -q '[^[:space:]]' dist/RELEASE_NOTES_CURRENT.md; then
+            echo "error: RELEASE_NOTES.md has no '## ${VERSION}' section — add release notes before tagging" >&2
+            exit 1
+          fi
+          # Compact HTML for the Sparkle update dialog: h3 headings + bullets.
+          python3 - <<'EOF'
+          import html, re
+          out, in_list = [], False
+          for line in open("dist/RELEASE_NOTES_CURRENT.md"):
+              line = line.rstrip()
+              if m := re.match(r"^###\s+(.+)$", line):
+                  if in_list: out.append("</ul>"); in_list = False
+                  out.append(f"<h4>{html.escape(m.group(1))}</h4>")
+              elif m := re.match(r"^[-*]\s+(.+)$", line):
+                  text = m.group(1)
+                  if bold := re.match(r"^\*\*(.+?)\*\*", text):
+                      text = bold.group(1)
+                  if not in_list: out.append("<ul>"); in_list = True
+                  out.append(f"<li>{html.escape(text)}</li>")
+          if in_list: out.append("</ul>")
+          open("dist/description.html", "w").write("".join(out))
+          EOF
+
       - name: Build appcast
         env:
           SPARKLE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
@@ -162,6 +196,7 @@ jobs:
             printf '%s\n' '    <language>en</language>'
             printf '%s\n' '    <item>'
             printf '%s\n' "      <title>Poise ${VERSION}</title>"
+            printf '%s\n' "      <description><![CDATA[$(cat dist/description.html)]]></description>"
             [[ -n "$CHANNEL_BLOCK" ]] && printf '%s\n' "$CHANNEL_BLOCK"
             printf '%s\n' "      <sparkle:version>${BUILD}</sparkle:version>"
             printf '%s\n' "      <sparkle:shortVersionString>${VERSION}</sparkle:shortVersionString>"
@@ -187,10 +222,10 @@ jobs:
           )
           if [[ "$CHANNEL" == "beta" ]]; then
             gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
-              --title "Poise ${VERSION}" --generate-notes --prerelease
+              --title "Poise ${VERSION}" --notes-file dist/RELEASE_NOTES_CURRENT.md --prerelease
           else
             gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
-              --title "Poise ${VERSION}" --generate-notes --latest
+              --title "Poise ${VERSION}" --notes-file dist/RELEASE_NOTES_CURRENT.md --latest
           fi
 
       - name: Publish beta appcast feed
